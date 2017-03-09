@@ -64,7 +64,7 @@ namespace Rainbow.Storage.Sc.Tests
 			//GetById_ReturnsItem_WhenItemIdExists(); // for now. in case implementation changes later, keep this redundant test.
 		}
 
-		[Theory, AutoDbData]
+		/*[Theory, AutoDbData]
 		public void GetById_ReturnsItem_WhenItemIdExists(Db db)
 		{
 			var id = new ID();
@@ -76,7 +76,7 @@ namespace Rainbow.Storage.Sc.Tests
 
 			Assert.NotNull(item);
 			Assert.Equal("Hello", item.Name);
-		}
+		}*/
 
 		[Theory, AutoDbData]
 		public void GetById_ReturnsNull_WhenItemIdDoesNotExist(Db db)

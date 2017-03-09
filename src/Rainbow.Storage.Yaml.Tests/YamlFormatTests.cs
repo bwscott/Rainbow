@@ -12,10 +12,13 @@ namespace Rainbow.Storage.Yaml.Tests
 		{
 			var testItem = CreateBaseTestItem();
 
+
 			ExecuteYamlWriter(writer =>
 			{
 				testItem.WriteYaml(writer);
 			}, BaseTestExpected);
+
+
 		}
 
 		[Fact]
@@ -56,6 +59,7 @@ namespace Rainbow.Storage.Yaml.Tests
 				using (var sr = new StreamReader(ms))
 				{
 					string result = sr.ReadToEnd();
+                    Console.WriteLine(result);
 					Assert.Equal(expectedOutput, result);
 				}
 			}

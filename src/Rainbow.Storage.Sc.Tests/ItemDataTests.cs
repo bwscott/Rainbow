@@ -42,9 +42,12 @@ namespace Rainbow.Storage.Sc.Tests
 		}
 
 		[Theory, AutoDbData]
-		public void BranchId_ReturnsExpectedValue(Db db, DbItem item, Guid branchId)
+		public void BranchId_ReturnsExpectedValue(Db db)
 		{
-			item.BranchId = new ID(branchId);
+            var item = new DbItem("test");
+		    var branchId = Guid.NewGuid();
+
+		    item.BranchId = new ID(branchId);
 			db.Add(item);
 
 			var dbItem = db.GetItem(item.ID);

@@ -67,7 +67,7 @@ namespace Rainbow.Storage.Sc.Tests
 		[Theory, AutoDbData]
 		public void GetById_ReturnsItem_WhenItemIdExists(Db db)
 		{
-			var id = new ID();
+		    var id = new ID(Guid.Empty);
 			db.Add(new DbItem("Hello", id));
 
 			var dataStore = CreateTestDataStore();

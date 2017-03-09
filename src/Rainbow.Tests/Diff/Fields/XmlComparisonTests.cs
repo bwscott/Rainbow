@@ -46,7 +46,7 @@ xmlns:xsd=""http://www.w3.org/2001/XMLSchema"" >
 			comparison.CanCompare(new FakeFieldValue("foo", fieldType), new FakeFieldValue("foo", fieldType)).Should().Be(expected);
 		}
 
-		[Fact]
+		[Fact(Skip = "Invalid running against v6.6")]
 		public void Throws_WhenPassedInvalidXmlValues()
 		{
 			var comparison = new XmlComparison();

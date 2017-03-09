@@ -6,6 +6,8 @@ using Rainbow.Diff.Fields;
 using Rainbow.Model;
 using Sitecore.Configuration;
 using Sitecore.Diagnostics;
+// ReSharper disable TooWideLocalVariableScope
+// ReSharper disable LoopCanBeConvertedToQuery
 
 namespace Rainbow.Diff
 {
@@ -67,6 +69,11 @@ namespace Rainbow.Diff
 			bool templateChanged = IsTemplateChanged(sourceItem, targetItem);
 
 			if(abortOnChangeFound && templateChanged) return new ItemComparisonResult(sourceItem, targetItem, isTemplateChanged: true);
+
+			// check if branches are different
+			bool branchChanged = IsBranchChanged(sourceItem, targetItem);
+
+			if (abortOnChangeFound && branchChanged) return new ItemComparisonResult(sourceItem, targetItem, isBranchChanged: true);
 
 			// check if names are different
 			bool renamed = IsRenamed(sourceItem, targetItem);
@@ -165,7 +172,7 @@ namespace Rainbow.Diff
 
 			changedVersions.AddRange(changedTargetVersions);
 
-			return new ItemComparisonResult(sourceItem, targetItem, renamed, moved, templateChanged, changedSharedFields, changedVersions.ToArray(), changedUnversionedFields.ToArray());
+			return new ItemComparisonResult(sourceItem, targetItem, renamed, moved, templateChanged, branchChanged, changedSharedFields, changedVersions.ToArray(), changedUnversionedFields.ToArray());
 		}
 
 		protected virtual bool IsRenamed(IItemData existingItemData, IItemData serializedItemData)
@@ -180,6 +187,13 @@ namespace Rainbow.Diff
 			return !serializedItemData.TemplateId.Equals(existingItemData.TemplateId);
 		}
 
+		protected virtual bool IsBranchChanged(IItemData existingItemData, IItemData serializedItemData)
+		{
+			if (existingItemData.BranchId == default(Guid) && serializedItemData.BranchId == default(Guid)) return false;
+
+			return !serializedItemData.BranchId.Equals(existingItemData.BranchId);
+		}
+
 		protected virtual FieldComparisonResult[] GetFieldDifferences(IEnumerable<IItemFieldValue> sourceFields, IEnumerable<IItemFieldValue> targetFields, IItemData existingItemData, IItemData serializedItemData, bool abortOnChangeFound)
 		{
 			var targetFieldIndex = targetFields.ToDictionary(x => x.FieldId);
@@ -187,13 +201,18 @@ namespace Rainbow.Diff
 
 			var changedFields = new List<FieldComparisonResult>();
 
-			foreach (var sourceField in sourceFieldIndex.Values)
+			bool isDifferent;
+			IItemFieldValue targetField;
+			IItemFieldValue sourceField;
+
+			foreach (var sourceFieldKeypair in sourceFieldIndex)
 			{
-				bool isDifferent = IsFieldDifferent(sourceField, targetFieldIndex, sourceField.FieldId);
+				sourceField = sourceFieldKeypair.Value;
+
+				isDifferent = IsFieldDifferent(sourceField, targetFieldIndex, sourceField.FieldId);
 
 				if (isDifferent)
 				{
-					IItemFieldValue targetField;
 					if (targetFieldIndex.TryGetValue(sourceField.FieldId, out targetField))
 					{
 						changedFields.Add(new FieldComparisonResult(sourceField, targetField));
@@ -210,7 +229,16 @@ namespace Rainbow.Diff
 			}
 
 			// add target-only fields to the changes
-			changedFields.AddRange(targetFieldIndex.Values.Where(field => !sourceFieldIndex.ContainsKey(field.FieldId) && !string.IsNullOrEmpty(field.Value)).Select(field => new FieldComparisonResult(null, field)));
+			IItemFieldValue targetOnlyField;
+			foreach (var targetFieldIndexKeypair in targetFieldIndex)
+			{
+				targetOnlyField = targetFieldIndexKeypair.Value;
+
+				if (sourceFieldIndex.ContainsKey(targetOnlyField.FieldId)) continue;
+				if (string.IsNullOrEmpty(targetOnlyField.Value)) continue;
+
+				changedFields.Add(new FieldComparisonResult(null, targetOnlyField));
+			}
 
 			return changedFields.ToArray();
 		}
@@ -225,11 +253,17 @@ namespace Rainbow.Diff
 			IItemFieldValue targetField;
 			if (!targetFields.TryGetValue(fieldId, out targetField)) return true;
 
-			var fieldComparer = FieldComparers.FirstOrDefault(comparer => comparer.CanCompare(sourceField, targetField));
+			IFieldComparer comparer;
+			for (var index = 0; index < FieldComparers.Count; index++)
+			{
+				comparer = FieldComparers[index];
 
-			if (fieldComparer == null) throw new InvalidOperationException("Unable to find a field comparison for " + sourceField.NameHint);
+				if (!comparer.CanCompare(sourceField, targetField)) continue;
 
-			return !fieldComparer.AreEqual(sourceField, targetField);
+				return !comparer.AreEqual(sourceField, targetField);
+			}
+
+			throw new InvalidOperationException("Unable to find a field comparison for " + sourceField.NameHint);
 		}
 
 		/// <summary>
@@ -238,7 +272,15 @@ namespace Rainbow.Diff
 		/// <returns>Null if the version does not exist or the version if it exists</returns>
 		protected virtual IItemVersion GetVersion(IItemData sourceItemData, string language, int versionNumber)
 		{
-			return sourceItemData.Versions.FirstOrDefault(x => x.Language.Name.Equals(language, StringComparison.OrdinalIgnoreCase) && x.VersionNumber == versionNumber);
+			foreach (var version in sourceItemData.Versions)
+			{
+				if (!version.Language.Name.Equals(language, StringComparison.OrdinalIgnoreCase)) continue;
+				if (version.VersionNumber != versionNumber) continue;
+				
+				return version;
+			}
+
+			return null;
 		}
 	}
 }

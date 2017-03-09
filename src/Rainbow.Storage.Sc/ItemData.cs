@@ -1,10 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Globalization;
 using System.Linq;
 using Rainbow.Model;
-using Sitecore.Data.Fields;
 using Sitecore.Data.Items;
 
 namespace Rainbow.Storage.Sc
@@ -12,12 +10,14 @@ namespace Rainbow.Storage.Sc
 	[DebuggerDisplay("{Name} ({DatabaseName}::{Id}) [DB ITEM]")]
 	public class ItemData : IItemData
 	{
+		private readonly Func<IDisposable> _itemOperationContextFactory;
 		private readonly Item _item;
 		private readonly IDataStore _sourceDataStore;
 		private Item[] _itemVersions;
+		private Item[] _itemLanguages;
 		// ReSharper disable once RedundantDefaultMemberInitializer
 		private bool _fieldsLoaded = false;
-		protected static FieldReader FieldReader = new FieldReader();
+		protected internal static FieldReader FieldReader = new FieldReader();
 
 		public ItemData(Item item)
 		{
@@ -27,6 +27,13 @@ namespace Rainbow.Storage.Sc
 		public ItemData(Item item, IDataStore sourceDataStore) : this(item)
 		{
 			_sourceDataStore = sourceDataStore;
+		}
+
+		/// <param name="item">The item to wrap</param>
+		/// <param name="itemOperationContextFactory">Creates a disposable context for operations that may hit the DB. Used to disable caches and such as needed to preserve the item's context when getting children, versions, etc.</param>
+		public ItemData(Item item, Func<IDisposable> itemOperationContextFactory) : this(item)
+		{
+			_itemOperationContextFactory = itemOperationContextFactory;
 		}
 
 		public virtual Guid Id => _item.ID.Guid;
@@ -72,7 +79,7 @@ namespace Rainbow.Storage.Sc
 		}
 
 		private IItemLanguage[] _unversionedFields;
-		public IEnumerable<IItemLanguage> UnversionedFields
+		public virtual IEnumerable<IItemLanguage> UnversionedFields
 		{
 			get
 			{
@@ -82,11 +89,15 @@ namespace Rainbow.Storage.Sc
 
 					var fieldReader = CreateFieldReader();
 
-					// Get all item versions, dedupe down to one per language only, then parse out the unversioned fields for each and project into a ProxyItemLanguage.
-					_unversionedFields = GetVersions()
-						.GroupBy(version => version.Language.Name)
-						.Select(group => group.First())
-						.Select(language => (IItemLanguage)new ProxyItemLanguage(language.Language.CultureInfo) { Fields = fieldReader.ParseFields(language, FieldReader.FieldReadType.Unversioned) })
+					// Get all item languages (note: not versions, because you can have unversioned fields without a version in a language)
+					// then parse out the unversioned fields for each and project into a ProxyItemLanguage.
+					_unversionedFields = GetAllLanguages()
+						.Select(language =>
+						{
+							language.Fields.ReadAll();
+							return (IItemLanguage)new ProxyItemLanguage(language.Language.CultureInfo) { Fields = fieldReader.ParseFields(language, FieldReader.FieldReadType.Unversioned) };
+						})
+						.Where(language => language.Fields.Any())
 						.ToArray();
 				}
 
@@ -123,14 +134,14 @@ namespace Rainbow.Storage.Sc
 			if (_sourceDataStore != null)
 				return _sourceDataStore.GetChildren(this);
 
-			return _item.GetChildren().Select(child => new ItemData(child));
+			return ItemOperation(() => _item.GetChildren()).Select(child => new ItemData(child, _itemOperationContextFactory));
 		}
 
 		protected virtual void EnsureFields()
 		{
 			if (!_fieldsLoaded)
 			{
-				_item.Fields.ReadAll();
+				ItemOperation(() => _item.Fields.ReadAll());
 				_fieldsLoaded = true;
 			}
 		}
@@ -138,9 +149,35 @@ namespace Rainbow.Storage.Sc
 		protected virtual Item[] GetVersions()
 		{
 			if (_itemVersions == null)
-				_itemVersions = _item.Versions.GetVersions(true);
+			{
+				_itemVersions = ItemOperation(() => _item.Versions.GetVersions(true));
+
+				// if we are on Sitecore 8.1.x we need to cull any language fallback'ed versions
+				// but we don't want to break compatibility with earlier Sitecore versions so we do a runtime version
+				// check prior to invoking the 8.1 API
+				/*if (SitecoreVersionResolver.IsVersionHigherOrEqual(SitecoreVersionResolver.SitecoreVersion81))
+				{
+					_itemVersions = _itemVersions.Where(version => !version.IsFallback).ToArray();
+				}*/
+			}
 
 			return _itemVersions;
+		}
+
+		protected virtual Item[] GetAllLanguages()
+		{
+			if (_itemLanguages == null)
+			{
+				// get the item in all known system languages
+				// this is different than getting all versions as unversioned fields may reside on items
+				// who do not have a version in a given language. Unusual, but possible.
+				_itemLanguages = ItemOperation(() => _item.Languages
+					.Select(lang => _item.Database.GetItem(_item.ID, lang))
+					.Where(item => item != null)
+					.ToArray());
+			}
+
+			return _itemLanguages;
 		}
 
 		protected virtual IItemVersion CreateVersion(Item version)
@@ -153,113 +190,27 @@ namespace Rainbow.Storage.Sc
 			return FieldReader;
 		}
 
-		[DebuggerDisplay("{NameHint} ({FieldType})")]
-		protected internal class ItemFieldValue : IItemFieldValue
+		protected virtual void ItemOperation(Action action)
 		{
-			private readonly Field _field;
-			private readonly string _retrievedStringValue;
-
-			public ItemFieldValue(Field field, string retrievedStringValue)
+			if (_itemOperationContextFactory == null)
 			{
-				_field = field;
-				_retrievedStringValue = retrievedStringValue;
+				action();
+				return;
 			}
 
-			public Guid FieldId => _field.ID.Guid;
-
-			public virtual string Value
+			using (_itemOperationContextFactory())
 			{
-				get
-				{
-					if (_field.IsBlobField)
-					{
-						if (!_field.HasBlobStream) return null;
-
-						using (var stream = _field.GetBlobStream())
-						{
-							var buf = new byte[stream.Length];
-
-							stream.Read(buf, 0, (int)stream.Length);
-
-							return Convert.ToBase64String(buf);
-						}
-					}
-					return _retrievedStringValue;
-				}
+				action();
 			}
-
-			public string FieldType => _field.Type;
-
-			public virtual Guid? BlobId
-			{
-				get
-				{
-					if (_field.IsBlobField)
-					{
-						string parsedIdValue = _field.Value;
-						if (parsedIdValue.Length > 38)
-							parsedIdValue = parsedIdValue.Substring(0, 38);
-
-						Guid blobId;
-						if (Guid.TryParse(parsedIdValue, out blobId)) return blobId;
-					}
-
-					return null;
-				}
-			}
-
-			public string NameHint => _field.Name;
 		}
 
-		[DebuggerDisplay("{Language} #{VersionNumber}")]
-		protected class ItemVersionValue : IItemVersion
+		protected virtual TResult ItemOperation<TResult>(Func<TResult> action)
 		{
-			private readonly Item _version;
-			// ReSharper disable once RedundantDefaultMemberInitializer
-			private bool _fieldsLoaded = false;
+			if (_itemOperationContextFactory == null) return action();
 
-			public ItemVersionValue(Item version)
+			using (_itemOperationContextFactory())
 			{
-				_version = version;
-			}
-
-			private List<IItemFieldValue> _fields;
-
-			public virtual IEnumerable<IItemFieldValue> Fields
-			{
-				get
-				{
-					if (_fields == null)
-					{
-						EnsureFields();
-
-						_fields = CreateFieldReader().ParseFields(_version, FieldReader.FieldReadType.Versioned);
-					}
-
-					return _fields;
-				}
-			}
-
-			public CultureInfo Language => _version.Language.CultureInfo;
-
-			public int VersionNumber => _version.Version.Number;
-
-			protected virtual void EnsureFields()
-			{
-				if (!_fieldsLoaded)
-				{
-					_version.Fields.ReadAll();
-					_fieldsLoaded = true;
-				}
-			}
-			protected virtual IItemFieldValue CreateFieldValue(Field field, string value)
-			{
-				return new ItemFieldValue(field, value);
-			}
-
-			protected virtual FieldReader CreateFieldReader()
-			{
-				return FieldReader;
+				return action();
 			}
 		}
 	}

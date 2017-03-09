@@ -171,6 +171,23 @@ namespace Rainbow.Tests.Storage
 		}
 
 		[Fact]
+		public void Save_WritesItem_WhenRootPathIsRelative()
+		{
+			using (var testTree = new TestSfsTree("/../../Items", "/sitecore"))
+			{
+				testTree.CreateTestTree("/sitecore/hello");
+
+				var rootItem = testTree.GetRootItem();
+
+				var childItem = testTree.GetChildren(rootItem).First();
+
+				Assert.Equal("/sitecore/hello", childItem.Path);
+				Assert.EndsWith("\\Items\\sitecore\\hello.yml", childItem.SerializedItemId);
+				Assert.False(childItem.SerializedItemId.Contains(".."));
+			}
+		}
+
+		[Fact]
 		public void Save_WritesExpectedItems_WhenItemNameIsTooLong_AndItemsWithSameShortenedNameExist()
 		{
 			using (var testTree = new TestSfsTree())
@@ -209,6 +226,19 @@ namespace Rainbow.Tests.Storage
 				Assert.EndsWith("Html Editor Drop Down Button.yml", children[0].SerializedItemId);
 				Assert.Equal(children[1].Path, "/sitecore/Html Editor Drop Down");
 				Assert.EndsWith("Html Editor Drop Down.yml", children[1].SerializedItemId);
+			}
+		}
+
+		[Fact]
+		public void Save_SetsSerializedItemId_WhenUsingDataCache()
+		{
+			using (var testTree = new TestSfsTree(useDataCache: true))
+			{
+				testTree.CreateTestTree("/sitecore");
+
+				var item = testTree.GetItemsByPath("/sitecore").First();
+
+				Assert.Equal(item.SerializedItemId, Path.Combine(testTree.PhysicalRootPath, "sitecore.yml"));
 			}
 		}
 	}

@@ -6,7 +6,6 @@ using System.Web.Hosting;
 using Rainbow.Formatting;
 using Rainbow.Model;
 using Sitecore.Diagnostics;
-using Sitecore.StringExtensions;
 
 namespace Rainbow.Storage
 {
@@ -14,7 +13,7 @@ namespace Rainbow.Storage
 	/// SFS data store stores serialized items on the file system.
 	/// Items are organized into one or more subtrees. Each tree must be solid (e.g. if a child is written all parents must also be written)
 	/// </summary>
-	public class SerializationFileSystemDataStore : IDataStore, IDocumentable, IDisposable
+	public class SerializationFileSystemDataStore : ISnapshotCapableDataStore, IDocumentable, IDisposable
 	{
 		protected readonly string PhysicalRootPath;
 		private readonly bool _useDataCache;
@@ -25,9 +24,9 @@ namespace Rainbow.Storage
 
 		public SerializationFileSystemDataStore(string physicalRootPath, bool useDataCache, ITreeRootFactory rootFactory, ISerializationFormatter formatter)
 		{
-			Assert.ArgumentNotNullOrEmpty(physicalRootPath, "rootPath");
-			Assert.ArgumentNotNull(formatter, "formatter");
-			Assert.ArgumentNotNull(rootFactory, "rootFactory");
+			Assert.ArgumentNotNullOrEmpty(physicalRootPath, nameof(physicalRootPath));
+			Assert.ArgumentNotNull(formatter, nameof(formatter));
+			Assert.ArgumentNotNull(rootFactory, nameof(rootFactory));
 
 			_useDataCache = useDataCache;
 			_rootFactory = rootFactory;
@@ -39,6 +38,11 @@ namespace Rainbow.Storage
 
 			// ReSharper disable once DoNotCallOverridableMethodsInConstructor
 			Trees = InitializeTrees(_formatter, useDataCache);
+		}
+
+		public virtual IEnumerable<IItemData> GetSnapshot()
+		{
+			return Trees.SelectMany(tree => tree.GetSnapshot());
 		}
 
 		public virtual void Save(IItemData item)
@@ -94,16 +98,19 @@ namespace Rainbow.Storage
 
 					if (tree == null) throw new InvalidOperationException("No trees contained the global path " + parent.Path);
 
-					var savedPath = tree.Save(parent);
-
-					// if we saved an item that was a former child of the item we want to keep it when we're doing deletions
-					if (oldPathItemAndDescendants.ContainsKey(savedPath)) oldPathItemAndDescendants.Remove(savedPath);
-
-					var children = parent.GetChildren();
-
-					foreach (var child in children)
+					using (new SfsDuplicateIdCheckingDisabler())
 					{
-						saveQueue.Enqueue(child);
+						var savedPath = tree.Save(parent);
+
+						// if we saved an item that was a former child of the item we want to keep it when we're doing deletions
+						if (oldPathItemAndDescendants.ContainsKey(savedPath)) oldPathItemAndDescendants.Remove(savedPath);
+
+						var children = parent.GetChildren();
+
+						foreach (var child in children)
+						{
+							saveQueue.Enqueue(child);
+						}
 					}
 				}
 			}
@@ -205,7 +212,8 @@ namespace Rainbow.Storage
 		public virtual void Clear()
 		{
 			// since we're tearing everything down we dispose all existing trees, watchers, etc and start over
-			foreach(var tree in Trees) tree.Dispose();
+			foreach (var tree in Trees) tree.Dispose();
+
 			Trees.Clear();
 
 			ActionRetryer.Perform(ClearAllFiles);
@@ -237,8 +245,16 @@ namespace Rainbow.Storage
 		{
 			if (rootPath.StartsWith("~") || rootPath.StartsWith("/"))
 			{
-				rootPath = HostingEnvironment.MapPath("~/") + rootPath.Substring(1).Replace("/", Path.DirectorySeparatorChar.ToString());
+				var cleanRootPath = rootPath.TrimStart('~', Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+				cleanRootPath = cleanRootPath.Replace("/", Path.DirectorySeparatorChar.ToString());
+
+				rootPath = Path.Combine(HostingEnvironment.MapPath("~/"), cleanRootPath);
 			}
+
+			// convert root path to canonical form, so subsequent transformations can do string comparison
+			// http://stackoverflow.com/questions/970911/net-remove-dots-from-the-path
+			if (rootPath.Contains(".."))
+				rootPath = Path.GetFullPath(rootPath);
 
 			if (!Directory.Exists(rootPath)) Directory.CreateDirectory(rootPath);
 
@@ -247,22 +263,35 @@ namespace Rainbow.Storage
 
 		protected virtual SerializationFileSystemTree GetTreeForPath(string path, string database)
 		{
-			var trees = Trees.Where(tree => tree.DatabaseName.Equals(database, StringComparison.OrdinalIgnoreCase) && tree.ContainsPath(path)).ToArray();
-
-			if (trees.Length == 0)
+			SerializationFileSystemTree foundTree = null;
+			foreach (var tree in Trees)
 			{
-				return null;
+				if (!tree.DatabaseName.Equals(database, StringComparison.OrdinalIgnoreCase)) continue;
+				if (!tree.ContainsPath(path)) continue;
+
+				if (foundTree != null)
+				{
+					throw new InvalidOperationException($"The trees {foundTree.Name} and {tree.Name} both contained the global path {path} - overlapping trees are not allowed.");
+				}
+
+				foundTree = tree;
 			}
 
-			if (trees.Length > 1) throw new InvalidOperationException("The trees {0} contained the global path {1} - overlapping trees are not allowed.".FormatWith(string.Join(", ", trees.Select(tree => tree.Name)), path));
-
-			return trees[0];
+			return foundTree;
 		}
 
 		// note: we pass in these params (formatter, datacache) so that overriding classes may get access to private vars indirectly (can't get at them otherwise because this is called from the constructor)
 		protected virtual List<SerializationFileSystemTree> InitializeTrees(ISerializationFormatter formatter, bool useDataCache)
 		{
-			return _rootFactory.CreateTreeRoots().Select(tree => CreateTree(tree, formatter, useDataCache)).ToList();
+			var result = new List<SerializationFileSystemTree>();
+			var roots = _rootFactory.CreateTreeRoots();
+
+			foreach (var root in roots)
+			{
+				result.Add(CreateTree(root, formatter, useDataCache));
+			}
+
+			return result;
 		}
 
 		// note: we pass in these params (formatter, datacache) so that overriding classes may get access to private vars indirectly (can't get at them otherwise because this is called from the constructor)
@@ -328,7 +357,7 @@ namespace Rainbow.Storage
 		{
 			if (disposing)
 			{
-				foreach(var tree in Trees) tree.Dispose();
+				foreach (var tree in Trees) tree.Dispose();
 			}
 		}
 	}

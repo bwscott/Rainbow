@@ -34,6 +34,15 @@ namespace Rainbow.Storage.Yaml
 			}
 		}
 
+		// used for testing
+		protected YamlSerializationFormatter(IFieldFilter fieldFilter, params IFieldFormatter[] fieldFormatters)
+		{
+			_fieldFilter = fieldFilter;
+
+			if(fieldFormatters != null)
+				FieldFormatters.AddRange(fieldFormatters);
+		}
+
 		public List<IFieldFormatter> FieldFormatters { get; } = new List<IFieldFormatter>();
 
 		public virtual IItemData ReadSerializedItem(Stream dataStream, string serializedItemId)
@@ -165,6 +174,9 @@ namespace Rainbow.Storage.Yaml
 				{
 					foreach (var language in _item.Languages)
 					{
+						// do not return unversioned languages if no unversioned fields exist in that language
+						if (language.UnversionedFields.Count == 0) continue;
+
 						yield return new YamlItemLanguage(language, _formatters);
 					}
 				}

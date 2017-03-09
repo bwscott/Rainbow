@@ -14,7 +14,7 @@ namespace Rainbow.Model
 	/// </summary>
 	public class ProxyItem : IItemData
 	{
-		private IEnumerable<IItemData> _proxyChildren;
+		private Func<IEnumerable<IItemData>> _proxyChildrenFactory;
 		 
 		public ProxyItem() : this("Unnamed", Guid.NewGuid(), Guid.Empty, Guid.Empty, "[orphan]", "master")
 		{
@@ -35,6 +35,13 @@ namespace Rainbow.Model
 			DatabaseName = itemToProxy.DatabaseName;
 		}
 
+		/// <param name="itemToProxy">The item to evaluate into a proxy</param>
+		/// <param name="proxyChildren">If true, the method to get children of the proxy item will be kept as a factory for the proxy item's children. Be careful with this as it can have undesirable memory effects as well as as cache issues</param>
+		public ProxyItem(IItemData itemToProxy, bool proxyChildren) : this(itemToProxy)
+		{
+			if(proxyChildren) SetProxyChildren(itemToProxy.GetChildren);
+		}
+
 		public ProxyItem(string name, Guid id, Guid parentId, Guid templateId, string path, string databaseName)
 		{
 			Assert.ArgumentNotNullOrEmpty(name, "name");
@@ -52,6 +59,11 @@ namespace Rainbow.Model
 			UnversionedFields = Enumerable.Empty<IItemLanguage>();
 		}
 
+		public ProxyItem(string name, Guid id, Guid parentId, Guid templateId, string path, string databaseName, Func<IEnumerable<IItemData>> childrenFactory) : this(name, id, parentId, templateId, path, databaseName)
+		{
+			SetProxyChildren(childrenFactory);
+		}
+
 		public virtual Guid Id { get; set; }
 		public virtual string DatabaseName { get; set; }
 		public virtual Guid ParentId { get; set; }
@@ -66,15 +78,20 @@ namespace Rainbow.Model
 
 		public virtual void SetProxyChildren(IEnumerable<IItemData> children)
 		{
-			_proxyChildren = children;
-		} 
+			SetProxyChildren(() => children);
+		}
+
+		public virtual void SetProxyChildren(Func<IEnumerable<IItemData>> childrenFactory)
+		{
+			_proxyChildrenFactory = childrenFactory;
+		}
 
 		public virtual IEnumerable<IItemData> GetChildren()
 		{
-			if(_proxyChildren == null)
+			if(_proxyChildrenFactory == null)
 				throw new NotImplementedException("Cannot get children of a proxied item that does not have them explicitly set with SetProxyChildren()");
 
-			return _proxyChildren;
+			return _proxyChildrenFactory();
 		}
 	}
 }

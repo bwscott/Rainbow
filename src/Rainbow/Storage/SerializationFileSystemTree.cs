@@ -31,8 +31,8 @@ namespace Rainbow.Storage
 				Note: reserialize may change the name of the item, if the original serializes after this one. Them's the breaks.
 		- For Remove(): read all, try to match by ID - if no matches do nothing
 	- The resultant node item should lazy load the actual file, so that we can tree walk the hierarchy without reading every inode's data
-	- Supported queries: 
-		Node GetRootNode(), 
+	- Supported queries:
+		Node GetRootNode(),
 		Node[] GetChildrenOfNode(Node n), - disambiguates child using parent node's ID, if multiple children at path exist
 		void Remove(Node n), - note recursive automatically
 		void Save(Node child) - note save will add or update existing node with same ID
@@ -82,7 +82,7 @@ namespace Rainbow.Storage
 		public event Action<IItemMetadata> TreeItemChanged;
 
 		/// <summary>
-		/// 
+		///
 		/// </summary>
 		/// <param name="name">A name for this tree, for your reference</param>
 		/// <param name="globalRootItemPath">The 'global' path where this tree is rooted. For example, if this was '/sitecore/content', the root item in this tree would be 'content'</param>
@@ -100,6 +100,8 @@ namespace Rainbow.Storage
 			Assert.IsTrue(globalRootItemPath.Length > 1, "The global root item path cannot be '/' - there is no root item. You probably mean '/sitecore'.");
 
 			_globalRootItemPath = globalRootItemPath.TrimEnd('/');
+			// enforce that the physical root path is filesystem-safe
+			AssertValidPhysicalPath(physicalRootPath);
 			_physicalRootPath = physicalRootPath;
 			_formatter = formatter;
 			_dataCache = new FsCache<IItemData>(useDataCache);
@@ -117,6 +119,16 @@ namespace Rainbow.Storage
 
 		[ExcludeFromCodeCoverage]
 		public virtual string Name { get; private set; }
+
+		/// <summary>
+		/// Gets every single item in the tree without regard to hierarchy traversal. Much faster than hierarchy traversal.
+		/// </summary>
+		public virtual IEnumerable<IItemData> GetSnapshot()
+		{
+			return Directory.EnumerateFiles(_physicalRootPath, "*" + _formatter.FileExtension, SearchOption.AllDirectories)
+				.AsParallel()
+				.Select(ReadItem);
+		}
 
 		public virtual bool ContainsPath(string globalPath)
 		{
@@ -168,14 +180,14 @@ namespace Rainbow.Storage
 		{
 			Assert.ArgumentNotNull(parentItem, "parentItem");
 
-			return GetChildPaths(parentItem).Select(ReadItem);
+			return GetChildPaths(parentItem).AsParallel().Select(ReadItem);
 		}
 
 		public virtual IEnumerable<IItemMetadata> GetChildrenMetadata(IItemMetadata parentItem)
 		{
 			Assert.ArgumentNotNull(parentItem, "parentItem");
 
-			return GetChildPaths(parentItem).Select(ReadItemMetadata);
+			return GetChildPaths(parentItem).AsParallel().Select(ReadItemMetadata);
 		}
 
 		/*
@@ -224,11 +236,8 @@ namespace Rainbow.Storage
 				{
 					ActionRetryer.Perform(() =>
 					{
-						lock (FileUtil.GetFileLock(descendant.SerializedItemId))
-						{
-							_treeWatcher.PushKnownUpdate(descendant.SerializedItemId);
-							File.Delete(descendant.SerializedItemId);
-						}
+						_treeWatcher.PushKnownUpdate(descendant.SerializedItemId, TreeWatcher.TreeWatcherChangeType.Delete);
+						File.Delete(descendant.SerializedItemId);
 					});
 				}
 				catch (Exception exception)
@@ -246,7 +255,7 @@ namespace Rainbow.Storage
 					{
 						ActionRetryer.Perform(() =>
 						{
-							_treeWatcher.PushKnownUpdate(childrenDirectory);
+							_treeWatcher.PushKnownUpdate(childrenDirectory, TreeWatcher.TreeWatcherChangeType.Delete);
 							Directory.Delete(childrenDirectory, true);
 						});
 					}
@@ -265,7 +274,7 @@ namespace Rainbow.Storage
 					{
 						ActionRetryer.Perform(() =>
 						{
-							_treeWatcher.PushKnownUpdate(shortChildrenDirectory.FullName);
+							_treeWatcher.PushKnownUpdate(shortChildrenDirectory.FullName, TreeWatcher.TreeWatcherChangeType.Delete);
 							Directory.Delete(shortChildrenDirectory.FullName);
 						});
 					}
@@ -349,13 +358,14 @@ namespace Rainbow.Storage
 			Assert.ArgumentNotNull(item, "item");
 			Assert.ArgumentNotNullOrEmpty(path, "path");
 
-			var proxiedItem = new ProxyItem(item);
+			// proxyChildren preserves ability to get the children of the proxy when its placed in the cache by using a factory callback
+			var proxiedItem = new ProxyItem(item, proxyChildren: true) { SerializedItemId = path };
 
 			lock (FileUtil.GetFileLock(path))
 			{
 				try
 				{
-					_treeWatcher.PushKnownUpdate(path);
+					_treeWatcher.PushKnownUpdate(path, TreeWatcher.TreeWatcherChangeType.ChangeOrAdd);
 					var directory = Path.GetDirectoryName(path);
 					if (directory != null && !Directory.Exists(directory)) Directory.CreateDirectory(directory);
 
@@ -371,7 +381,7 @@ namespace Rainbow.Storage
 				}
 			}
 
-			AddToMetadataCache(item, path);
+			AddToMetadataCache(proxiedItem, path);
 			_dataCache.AddOrUpdate(path, proxiedItem);
 		}
 
@@ -391,13 +401,13 @@ namespace Rainbow.Storage
 
 		/*
 		CALCULATING AN ITEM'S PATH TO SAVE TO, GIVEN A WHOLE ITEM WITH PARENT ID, VIRTUAL PATH
-	
+
 				1. Start by using "finding file paths, given a virtual path" on the parent path of the item
 				2. If no matches exist, throw - parent must be serialized
 				3. If multiple matches exist, narrow them by the parent ID of the item - if no matches, throw
 				4. If one match, parent path is found
-				4.5. Determine if this item has any name-dupes in the source store (use 'finding child paths, given a physical path', and filter on the same name prefix). 
-					- If no (and no can include 'yes, but this item exists and has an unescaped name already so we want to reuse that'), push its name onto the path string. 
+				4.5. Determine if this item has any name-dupes in the source store (use 'finding child paths, given a physical path', and filter on the same name prefix).
+					- If no (and no can include 'yes, but this item exists and has an unescaped name already so we want to reuse that'), push its name onto the path string.
 					- If yes, escape it and push that onto the path string
 				5. Strip characters not allowed by the filesystem from the base path
 				6. The path string is now the 'base' path, which may be too long to use
@@ -423,7 +433,7 @@ namespace Rainbow.Storage
 			//  If no matches exist, and the item isn't the root item, throw - parent must be serialized
 			if (parentItem == null)
 			{
-				throw new InvalidOperationException("The parent item of {0} was not serialized. You cannot have a sparse serialized tree.".FormatWith(item.Path));
+				throw new InvalidOperationException("The parent item of {0} was not serialized. You cannot have a sparse serialized tree. You may need to serialize this item's parents.".FormatWith(item.Path));
 			}
 
 			// Determine if this item has any name-dupes in the source store.
@@ -470,6 +480,9 @@ namespace Rainbow.Storage
 				basePath = string.Concat(Path.ChangeExtension(parentItem.SerializedItemId, null), Path.DirectorySeparatorChar, strippedItemName, _formatter.FileExtension);
 
 			// Determine if the relative base-string is over - length(which would be 240 - $(Serialization.SerializationFolderPathMaxLength))
+			if (_physicalRootPath.Length > basePath.Length)
+				throw new InvalidOperationException($"_physicalRootPath '{_physicalRootPath}' cannot be larger than '{basePath}'");
+
 			string relativeBasePath = basePath.Substring(_physicalRootPath.Length);
 			int maxPathLength = MaxRelativePathLength;
 
@@ -545,21 +558,21 @@ namespace Rainbow.Storage
 			if (serializedItem == null)
 				throw new InvalidOperationException("Item {0} does not exist on disk.".FormatWith(item.Path));
 
-			IEnumerable<FileData> children = Enumerable.Empty<FileData>();
+			IEnumerable<string> children = Enumerable.Empty<string>();
 
 			var childrenPath = Path.ChangeExtension(serializedItem.SerializedItemId, null);
 
 			if (Directory.Exists(childrenPath))
 			{
-				children = FastDirectoryEnumerator.GetFiles(childrenPath, "*" + _formatter.FileExtension, SearchOption.TopDirectoryOnly);
+				children = Directory.EnumerateFiles(childrenPath, "*" + _formatter.FileExtension, SearchOption.TopDirectoryOnly);
 			}
 
 			var shortPath = Path.Combine(_physicalRootPath, item.Id.ToString());
 
 			if (Directory.Exists(shortPath))
-				children = children.Concat(FastDirectoryEnumerator.GetFiles(shortPath, "*" + _formatter.FileExtension, SearchOption.TopDirectoryOnly));
+				children = children.Concat(Directory.EnumerateFiles(shortPath, "*" + _formatter.FileExtension, SearchOption.TopDirectoryOnly));
 
-			return children.Select(result => result.Path).ToArray();
+			return children.ToArray();
 		}
 
 		protected virtual string PrepareItemNameForFileSystem(string name)
@@ -579,6 +592,27 @@ namespace Rainbow.Storage
 			return validifiedName;
 		}
 
+		protected void AssertValidPhysicalPath(string physicalPath)
+		{
+			var pathPieces = physicalPath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+			foreach (var pathPiece in pathPieces)
+			{
+				if (InvalidFileNames.Contains(pathPiece)) throw new ArgumentException($"Illegal file or directory name {pathPiece} is part of the tree root physical path {physicalPath}. If you're using Unicorn, you may need to specify a 'name' attribute on your include to make the path a valid name.", nameof(physicalPath));
+
+				foreach (var invalidChar in InvalidFileNameCharacters)
+				{
+					if (pathPiece.Contains(invalidChar))
+					{
+						// : is okay for a drive letter :)
+						if (invalidChar == ':' && pathPiece.IndexOf(':') == 1) continue;
+
+						throw new ArgumentException($"Illegal character {invalidChar} in tree root physical path {physicalPath}. If you're using Unicorn, you may need to specify a 'name' attribute on your include to make the path a valid name.", nameof(physicalPath));
+					}
+				}
+			}
+		}
+
 		protected virtual IItemMetadata GetItemForGlobalPath(string globalPath, Guid expectedItemId)
 		{
 			Assert.ArgumentNotNullOrEmpty(globalPath, "virtualPath");
@@ -590,7 +624,7 @@ namespace Rainbow.Storage
 
 			var result = GetPhysicalFilePathsForVirtualPath(localPath)
 				.Select(ReadItemMetadata)
-				.FirstOrDefault(candidateItem => candidateItem.Id == expectedItemId);
+				.FirstOrDefault(candidateItem => candidateItem != null && candidateItem.Id == expectedItemId);
 
 			if (result == null) return null;
 
@@ -763,7 +797,7 @@ namespace Rainbow.Storage
 		/// Configures the tree to enable fast reads of items by ID or template ID,
 		/// by preloading the whole metadata on disk into cache at once and then
 		/// watching for metadata changes with a filesystem watcher to update the cache.
-		/// 
+		///
 		/// This enables us to rapidly say "this ID is not in this tree," which is an
 		/// essential component of a performant data provider read implementation.
 		/// </summary>

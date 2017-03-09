@@ -57,6 +57,8 @@ namespace Rainbow.Storage.Sc.Deserialization
 			{
 				ChangeTemplateIfNeeded(serializedItemData, targetItem);
 
+				ChangeBranchIfNeeded(serializedItemData, targetItem, newItemWasCreated);
+
 				RenameIfNeeded(serializedItemData, targetItem);
 
 				ResetTemplateEngineIfItemIsTemplate(targetItem);
@@ -106,6 +108,17 @@ namespace Rainbow.Storage.Sc.Deserialization
 
 			newItemWasCreated = false;
 
+			// very occasionally the caches will be out of date, and can return that an item 'exists' but
+			// has no parent. If this occurs, we want to dump all caches and return the item, which will
+			// then correctly reflect that the item did not exist and create it.
+			// Why? Not sure.
+			if (targetItem != null && targetItem.ParentID == ID.Null)
+			{
+				CacheManager.ClearAllCaches();
+
+				targetItem = database.GetItem(new ID(serializedItemData.Id));
+			}
+
 			// the target item did not yet exist, so we need to start by creating it
 			if (targetItem == null)
 			{
@@ -144,28 +157,42 @@ namespace Rainbow.Storage.Sc.Deserialization
 			return targetItem;
 		}
 
-		protected void RenameIfNeeded(IItemData serializedItemData, Item targetItem)
+		protected void ChangeBranchIfNeeded(IItemData serializedItemData, Item targetItem, bool newItemWasCreated)
 		{
-			if (targetItem.Name == serializedItemData.Name && targetItem.BranchId.Guid.Equals(serializedItemData.BranchId)) return;
+			if (targetItem.BranchId.Guid.Equals(serializedItemData.BranchId)) return;
 
-			string oldName = targetItem.Name;
 			Guid oldBranchId = targetItem.BranchId.Guid;
 
-			using (new EditContext(targetItem))
+			targetItem.Editing.BeginEdit();
+			targetItem.RuntimeSettings.ReadOnlyStatistics = true;
+			targetItem.BranchId = ID.Parse(serializedItemData.BranchId);
+			targetItem.Editing.EndEdit();
+
+			ClearCaches(targetItem.Database, targetItem.ID);
+			targetItem.Reload();
+
+			if (oldBranchId != serializedItemData.BranchId && !newItemWasCreated)
 			{
-				targetItem.RuntimeSettings.ReadOnlyStatistics = true;
-				targetItem.Name = serializedItemData.Name;
-				targetItem.BranchId = ID.Parse(serializedItemData.BranchId);
+				_logger.ChangedBranchTemplate(targetItem, new ID(oldBranchId).ToString());
 			}
+		}
+
+		protected void RenameIfNeeded(IItemData serializedItemData, Item targetItem)
+		{
+			if (targetItem.Name.Equals(serializedItemData.Name, StringComparison.Ordinal)) return;
+
+			string oldName = targetItem.Name;
+
+			targetItem.Editing.BeginEdit();
+			targetItem.RuntimeSettings.ReadOnlyStatistics = true;
+			targetItem.Name = serializedItemData.Name;
+			targetItem.Editing.EndEdit();
 
 			ClearCaches(targetItem.Database, targetItem.ID);
 			targetItem.Reload();
 
 			if (oldName != serializedItemData.Name)
 				_logger.RenamedItem(targetItem, oldName);
-
-			if (oldBranchId != serializedItemData.BranchId)
-				_logger.ChangedBranchTemplate(targetItem, new ID(oldBranchId).ToString());
 		}
 
 		protected void ChangeTemplateIfNeeded(IItemData serializedItemData, Item targetItem)
@@ -177,33 +204,34 @@ namespace Rainbow.Storage.Sc.Deserialization
 
 			Assert.IsNotNull(newTemplate, "Cannot change template of {0} because its new template {1} does not exist!", targetItem.ID, serializedItemData.TemplateId);
 
-			using (new EditContext(targetItem))
+			targetItem.Editing.BeginEdit();
+
+			targetItem.RuntimeSettings.ReadOnlyStatistics = true;
+			try
 			{
-				targetItem.RuntimeSettings.ReadOnlyStatistics = true;
-				try
+				targetItem.ChangeTemplate(newTemplate);
+			}
+			catch
+			{
+				// this generally means that we tried to sync an item and change its template AND we already deleted the item's old template in the same sync
+				// the Sitecore change template API chokes if the item's CURRENT template is unavailable, but we can get around that
+				// issure reported to Sitecore Support (406546)
+				lock (targetItem.SyncRoot)
 				{
-					targetItem.ChangeTemplate(newTemplate);
-				}
-				catch
-				{
-					// this generally means that we tried to sync an item and change its template AND we already deleted the item's old template in the same sync
-					// the Sitecore change template API chokes if the item's CURRENT template is unavailable, but we can get around that
-					// issure reported to Sitecore Support (406546)
-					lock (targetItem.SyncRoot)
-					{
-						Template sourceTemplate = TemplateManager.GetTemplate(targetItem);
-						Template targetTemplate = TemplateManager.GetTemplate(newTemplate.ID, targetItem.Database);
+					Template sourceTemplate = TemplateManager.GetTemplate(targetItem);
+					Template targetTemplate = TemplateManager.GetTemplate(newTemplate.ID, targetItem.Database);
 
-						Error.AssertNotNull(targetTemplate, "Could not get target in ChangeTemplate");
+					Error.AssertNotNull(targetTemplate, "Could not get target in ChangeTemplate");
 
-						// this is probably true if we got here. This is the check the Sitecore API fails to make, and throws a NullReferenceException.
-						if (sourceTemplate == null) sourceTemplate = targetTemplate;
+					// this is probably true if we got here. This is the check the Sitecore API fails to make, and throws a NullReferenceException.
+					if (sourceTemplate == null) sourceTemplate = targetTemplate;
 
-						TemplateChangeList templateChangeList = sourceTemplate.GetTemplateChangeList(targetTemplate);
-						TemplateManager.ChangeTemplate(targetItem, templateChangeList);
-					}
+					TemplateChangeList templateChangeList = sourceTemplate.GetTemplateChangeList(targetTemplate);
+					TemplateManager.ChangeTemplate(targetItem, templateChangeList);
 				}
 			}
+
+			targetItem.Editing.EndEdit();
 
 			ClearCaches(targetItem.Database, targetItem.ID);
 			targetItem.Reload();
@@ -217,6 +245,9 @@ namespace Rainbow.Storage.Sc.Deserialization
 		/// </summary>
 		protected void UpdateFieldSharingIfNeeded(IItemData serializedItemData, Item targetItem)
 		{
+			Assert.ArgumentNotNull(serializedItemData, nameof(serializedItemData));
+			Assert.ArgumentNotNull(targetItem, nameof(targetItem));
+
 			if (serializedItemData.TemplateId != TemplateIDs.TemplateField.Guid) return;
 
 			var shared = serializedItemData.SharedFields.FirstOrDefault(field => field.FieldId == TemplateFieldIDs.Shared.Guid);
@@ -228,6 +259,17 @@ namespace Rainbow.Storage.Sc.Deserialization
 			else if (unversioned != null && unversioned.Value.Equals("1")) sharedness = TemplateFieldSharing.Unversioned;
 
 			var templateField = TemplateManager.GetTemplateField(targetItem.ID, targetItem.Parent.Parent.ID, targetItem.Database);
+
+			if (templateField == null)
+			{
+				// BOMB WIG
+				CacheManager.ClearAllCaches();
+				targetItem.Database.Engines.TemplateEngine.Reset();
+
+				templateField = TemplateManager.GetTemplateField(targetItem.ID, targetItem.Parent.Parent.ID, targetItem.Database);
+			}
+
+			Assert.IsNotNull(templateField, $"Unable to find template field {targetItem.ID} in {targetItem.Database.Name}, even after resetting the engine.");
 
 			TemplateFieldSharing templateSharedness = TemplateFieldSharing.None;
 			if (templateField.IsShared) templateSharedness = TemplateFieldSharing.Shared;
@@ -264,7 +306,7 @@ namespace Rainbow.Storage.Sc.Deserialization
 
 		protected virtual void PasteSharedFields(IItemData serializedItemData, Item targetItem, bool newItemWasCreated, List<TemplateMissingFieldException> softErrors)
 		{
-			bool commitEditContext = false;
+			bool commitEdit = false;
 
 			try
 			{
@@ -283,7 +325,7 @@ namespace Rainbow.Storage.Sc.Deserialization
 
 						field.Reset();
 
-						commitEditContext = true;
+						commitEdit = true;
 					}
 				}
 
@@ -292,7 +334,7 @@ namespace Rainbow.Storage.Sc.Deserialization
 					try
 					{
 						if (PasteField(targetItem, field, newItemWasCreated))
-							commitEditContext = true;
+							commitEdit = true;
 					}
 					catch (TemplateMissingFieldException tex)
 					{
@@ -301,7 +343,7 @@ namespace Rainbow.Storage.Sc.Deserialization
 				}
 
 				// we commit the edit context - and write to the DB - only if we changed something
-				if (commitEditContext)
+				if (commitEdit)
 				{
 					targetItem.Editing.EndEdit();
 
@@ -352,6 +394,8 @@ namespace Rainbow.Storage.Sc.Deserialization
 
 			Item languageItem = item.Database.GetItem(item.ID, language);
 
+			if(languageItem == null) throw new InvalidOperationException("Item retrieved from the database was null. This may indicate issues with the Sitecore cache. Recycle your app pool and try again and it should work.");
+
 			Item languageVersionItem = languageItem.Versions[targetVersion];
 
 			IDictionary<Guid, IItemFieldValue> serializedVersionFieldsLookup = serializedVersion.Fields.ToDictionary(field => field.FieldId);
@@ -379,7 +423,7 @@ namespace Rainbow.Storage.Sc.Deserialization
 			}
 
 			// begin writing the version data
-			bool commitEditContext = false;
+			bool commitEdit = false;
 
 			try
 			{
@@ -408,7 +452,7 @@ namespace Rainbow.Storage.Sc.Deserialization
 
 					field.Reset();
 
-					commitEditContext = true;
+					commitEdit = true;
 				}
 
 				bool wasOwnerFieldParsed = false;
@@ -420,7 +464,7 @@ namespace Rainbow.Storage.Sc.Deserialization
 					try
 					{
 						if (PasteField(languageVersionItem, field, creatingNewItem))
-							commitEditContext = true;
+							commitEdit = true;
 					}
 					catch (TemplateMissingFieldException tex)
 					{
@@ -431,11 +475,11 @@ namespace Rainbow.Storage.Sc.Deserialization
 				if (!wasOwnerFieldParsed)
 				{
 					languageVersionItem.Fields[FieldIDs.Owner].Reset();
-					commitEditContext = true;
+					commitEdit = true;
 				}
 
 				// if the item came with blank statistics, and we're creating the item or have version updates already, let's set some sane defaults - update revision, set last updated, etc
-				if (creatingNewItem || commitEditContext)
+				if (creatingNewItem || commitEdit)
 				{
 					if (!serializedVersionFieldsLookup.ContainsKey(FieldIDs.Revision.Guid))
 					{
@@ -454,7 +498,7 @@ namespace Rainbow.Storage.Sc.Deserialization
 				}
 
 				// we commit the edit context - and write to the DB - only if we changed something
-				if (commitEditContext)
+				if (commitEdit)
 					languageVersionItem.Editing.EndEdit();
 			}
 			finally
@@ -463,7 +507,7 @@ namespace Rainbow.Storage.Sc.Deserialization
 					languageVersionItem.Editing.CancelEdit();
 			}
 
-			if (commitEditContext)
+			if (commitEdit)
 			{
 				ClearCaches(languageVersionItem.Database, languageVersionItem.ID);
 				ResetTemplateEngineIfItemIsTemplate(languageVersionItem);
@@ -483,7 +527,7 @@ namespace Rainbow.Storage.Sc.Deserialization
 		protected virtual void PasteUnversionedLanguage(Item item, IItemLanguage serializedLanguage, bool newItemWasCreated, List<TemplateMissingFieldException> softErrors)
 		{
 			Language language = Language.Parse(serializedLanguage.Language.Name);
-			
+
 			Item targetItem = item.Database.GetItem(item.ID, language);
 
 			if (targetItem == null)
@@ -495,7 +539,7 @@ namespace Rainbow.Storage.Sc.Deserialization
 
 			Assert.IsNotNull(targetItem, "Target item language to paste unversioned fields into was null.");
 
-			bool commitEditContext = false;
+			bool commitEdit = false;
 
 			try
 			{
@@ -515,7 +559,7 @@ namespace Rainbow.Storage.Sc.Deserialization
 
 						field.Reset();
 
-						commitEditContext = true;
+						commitEdit = true;
 					}
 				}
 
@@ -524,7 +568,7 @@ namespace Rainbow.Storage.Sc.Deserialization
 					try
 					{
 						if (PasteField(targetItem, field, newItemWasCreated))
-							commitEditContext = true;
+							commitEdit = true;
 					}
 					catch (TemplateMissingFieldException tex)
 					{
@@ -533,7 +577,7 @@ namespace Rainbow.Storage.Sc.Deserialization
 				}
 
 				// we commit the edit context - and write to the DB - only if we changed something
-				if (commitEditContext)
+				if (commitEdit)
 					targetItem.Editing.EndEdit();
 			}
 			finally
@@ -573,11 +617,25 @@ namespace Rainbow.Storage.Sc.Deserialization
 			Field itemField = item.Fields[new ID(field.FieldId)];
 			if (itemField.IsBlobField)
 			{
-				if (!field.BlobId.HasValue) throw new InvalidOperationException("Field " + field.FieldId + " is a blob field, but it had no blob ID.");
+				Guid existingBlobId;
+				bool hasExistingId = Guid.TryParse(itemField.Value, out existingBlobId);
+
+				// serialized blob has no value (media item with detached media)
+				if (!field.BlobId.HasValue)
+				{
+					if (!hasExistingId || existingBlobId == Guid.Empty) return false; // no blob ID and none in DB either, so we're cool
+
+					// existing blob in DB but none in serialized
+					// so clear the blob and field value
+					ItemManager.RemoveBlobStream(existingBlobId, item.Database);
+					itemField.SetValue(string.Empty, true);
+					_logger.WroteBlobStream(item, field);
+
+					return true;
+				}
 
 				// check if existing blob is here with the same ID; abort if so
-				Guid existingBlobId;
-				if (Guid.TryParse(itemField.Value, out existingBlobId) && existingBlobId == field.BlobId.Value) return false;
+				if (hasExistingId && existingBlobId == field.BlobId.Value) return false;
 
 				byte[] buffer = Convert.FromBase64String(field.Value);
 
@@ -596,7 +654,7 @@ namespace Rainbow.Storage.Sc.Deserialization
 				return true;
 			}
 
-			if (field.Value != null && !field.Value.Equals(itemField.Value))
+			if (field.Value != null && !field.Value.Equals(itemField.GetValue(false, false)))
 			{
 				var oldValue = itemField.Value;
 				itemField.SetValue(field.Value, true);

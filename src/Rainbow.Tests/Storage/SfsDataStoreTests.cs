@@ -1,4 +1,5 @@
 ﻿using System;
+using System.IO;
 using System.Linq;
 using FluentAssertions;
 using Xunit;
@@ -15,6 +16,15 @@ namespace Rainbow.Tests.Storage
 				var item = new FakeItem(path: "/sitecore");
 
 				dataStore.Save(item);
+			}
+		}
+
+		[Fact]
+		public void InitializeRootPath_RemovesDots()
+		{
+			using (var dataStore = new TestSfsDataStore("/sitecore", Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString(), @"..\Items")))
+			{
+				Assert.False(dataStore.PhysicalRootPathAccessor.Contains(".."));
 			}
 		}
 
@@ -92,6 +102,33 @@ namespace Rainbow.Tests.Storage
 				// verify children moved
 				Assert.NotEmpty(retrievedRenamedChild);
 				Assert.Equal("/sitecore/hexed/smash", retrievedRenamedChild.First().Path);
+			}
+		}
+
+		[Fact]
+		public void MoveOrRename_RenamesItem_WhenDestinationIsASubsetOfSourceName()
+		{
+			using (var dataStore = new TestSfsDataStore("/sitecore"))
+			{
+				var startingItemName = "thumpy basscannon";
+				var renameItemName = "thumpy";
+
+				dataStore.CreateTestItemTree("/sitecore");
+
+				var itemToRename = new FakeItem(path: $"/sitecore/{startingItemName}", name: startingItemName, id: Guid.NewGuid());
+
+				dataStore.Save(itemToRename);
+
+				// note adding children with old paths; method takes care of rewriting child paths
+				var renamedItem = new FakeItem(id: itemToRename.Id, path: $"/sitecore/{renameItemName}", name: renameItemName);
+
+				dataStore.MoveOrRenameItem(renamedItem, itemToRename.Path);
+
+				var retrievedRenamedItem = dataStore.GetByPath($"/sitecore/{renameItemName}", "master").ToArray();
+
+				retrievedRenamedItem.Length.Should().Be(1);
+				retrievedRenamedItem.First().Path.Should().Be($"/sitecore/{renameItemName}");
+				retrievedRenamedItem.First().SerializedItemId.Should().EndWith($"\\{renameItemName}.yml");
 			}
 		}
 
@@ -313,7 +350,7 @@ namespace Rainbow.Tests.Storage
 		{
 			Assert.Throws<InvalidOperationException>(() =>
 			{
-				using (var dataStore = new TestSfsDataStore("/sitecore", "/sitecore/content"))
+				using (var dataStore = new TestSfsDataStore(new[] { "/sitecore", "/sitecore/content" }))
 				{
 					dataStore.GetByPath("/sitecore/content/home", "master");
 				}
@@ -323,7 +360,7 @@ namespace Rainbow.Tests.Storage
 		[Fact]
 		public void GetItem_DoesNotThrowError_WhenSimilarNonOverlappingPaths()
 		{
-			using (var dataStore = new TestSfsDataStore("/sitecore/content", "/sitecore/content cemetary"))
+			using (var dataStore = new TestSfsDataStore(new[] { "/sitecore/content", "/sitecore/content cemetary" }))
 			{
 				dataStore.GetByPath("/sitecore/content cemetary/foo", "master");
 			}

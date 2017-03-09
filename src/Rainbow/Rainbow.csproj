@@ -9,8 +9,9 @@
     <AppDesignerFolder>Properties</AppDesignerFolder>
     <RootNamespace>Rainbow</RootNamespace>
     <AssemblyName>Rainbow</AssemblyName>
-    <TargetFrameworkVersion>v4.5</TargetFrameworkVersion>
+    <TargetFrameworkVersion>v4.5.2</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
+    <TargetFrameworkProfile />
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
     <DebugSymbols>true</DebugSymbols>
@@ -32,6 +33,7 @@
   <ItemGroup>
     <Reference Include="Sitecore.Kernel">
       <HintPath>..\..\lib\Sitecore\v7\Sitecore.Kernel.dll</HintPath>
+      <Private>False</Private>
     </Reference>
     <Reference Include="System" />
     <Reference Include="System.Configuration" />
@@ -51,6 +53,7 @@
     <Compile Include="Diff\Fields\FieldComparisonResult.cs" />
     <Compile Include="Diff\Fields\FieldTypeBasedComparison.cs" />
     <Compile Include="Diff\Fields\IFieldComparer.cs" />
+    <Compile Include="Diff\Fields\CheckboxComparison.cs" />
     <Compile Include="Diff\Fields\MultiLineTextComparison.cs" />
     <Compile Include="Diff\Fields\MultilistComparison.cs" />
     <Compile Include="Diff\Fields\XmlComparison.cs" />
@@ -62,11 +65,13 @@
     <Compile Include="DocumentationUtility.cs" />
     <Compile Include="Filtering\ConfigurationFieldFilter.cs" />
     <Compile Include="Filtering\FilteredItem.cs" />
+    <Compile Include="Filtering\IEnumerableFieldFilter.cs" />
     <Compile Include="Filtering\IFieldFilter.cs" />
     <Compile Include="Formatting\FieldFormatters\IFieldFormatter.cs" />
+    <Compile Include="Formatting\FieldFormatters\CheckboxFieldFormatter.cs" />
     <Compile Include="Formatting\FieldFormatters\MultilistFormatter.cs" />
     <Compile Include="Formatting\FieldFormatters\XmlFieldFormatter.cs" />
-    <Compile Include="Formatting\FieldTypeBasedFormatter.cs" />
+    <Compile Include="Formatting\FieldFormatters\FieldTypeBasedFormatter.cs" />
     <Compile Include="Formatting\ISerializationFormatter.cs" />
     <Compile Include="IDocumentable.cs" />
     <Compile Include="Model\IItemLanguage.cs" />
@@ -76,8 +81,8 @@
     <Compile Include="Model\ProxyItemLanguage.cs" />
     <Compile Include="Model\ProxyItemVersion.cs" />
     <Compile Include="Model\ItemDecorator.cs" />
+    <Compile Include="Storage\ISnapshotCapableDataStore.cs" />
     <Compile Include="Storage\SfsDuplicateIdCheckingDisabler.cs" />
-    <Compile Include="Storage\FastDirectoryEnumerator.cs" />
     <Compile Include="Storage\FsCache.cs" />
     <Compile Include="Storage\IDataStore.cs" />
     <Compile Include="Model\IItemFieldValue.cs" />
@@ -95,10 +100,13 @@
     <Compile Include="Storage\TreeWatcher.cs" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="packages.config" />
     <None Include="TODO.txt" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="Rainbow.config" />
+    <None Include="Rainbow.config">
+      <SubType>Designer</SubType>
+    </None>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <!-- To modify your build process, add your task inside one of the targets below and uncomment it. 

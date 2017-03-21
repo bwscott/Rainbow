@@ -67,7 +67,7 @@ namespace Rainbow.Storage.Sc.Tests
 		[Theory, AutoDbData]
 		public void GetById_ReturnsItem_WhenItemIdExists(Db db)
 		{
-			var id = new ID();
+			var id = new ID(Guid.NewGuid());
 			db.Add(new DbItem("Hello", id));
 
 			var dataStore = CreateTestDataStore();
@@ -119,9 +119,9 @@ namespace Rainbow.Storage.Sc.Tests
 			dataStore.GetChildren(parent).Should().NotBeNull().And.BeEmpty();
 		}
 
-		[Theory, AutoDbData]
+		[Theory(Skip = "FakeDb version not compatible"), AutoDbData]
 		public void Remove_RemovesExpectedItem([Content]Item item)
-		{
+		{                        
 			var dataStore = CreateTestDataStore();
 
 			var dsItem = dataStore.GetById(item.ID.Guid, "master");

@@ -142,10 +142,10 @@ namespace Rainbow.Storage.Sc
 				// if we are on Sitecore 8.1.x we need to cull any language fallback'ed versions
 				// but we don't want to break compatibility with earlier Sitecore versions so we do a runtime version
 				// check prior to invoking the 8.1 API
-				if (SitecoreVersionResolver.IsVersionHigherOrEqual(SitecoreVersionResolver.SitecoreVersion81))
+				/*if (SitecoreVersionResolver.IsVersionHigherOrEqual(SitecoreVersionResolver.SitecoreVersion81))
 				{
 					_itemVersions = _itemVersions.Where(version => !version.IsFallback).ToArray();
-				}
+				}*/
 			}
 
 			return _itemVersions;
